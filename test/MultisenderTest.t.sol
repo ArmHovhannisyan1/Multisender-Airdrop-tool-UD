@@ -2,16 +2,14 @@
 pragma solidity ^0.8.33;
 
 import {Test} from "forge-std/Test.sol";
-import {MultisenderFactory} from "../src/MultisenderFactory.sol";
 import {Multisender} from "../src/Multisender.sol";
-import {ERC20Mock} from "../src/MockUSDT.sol";
+import {ERC20Mock} from "../test/mocks/MockUSDT.sol";
 import {DeployMultisender} from "../script/DeployMultisender.s.sol";
 import {console} from "forge-std/console.sol";
 
 contract MultisenderTest is Test {
     DeployMultisender public deployer;
-    MultisenderFactory public factory;
-    // Multisender public multisender;
+    Multisender public multisender;
     ERC20Mock public usdt;
     ERC20Mock public token;
 
@@ -22,151 +20,325 @@ contract MultisenderTest is Test {
 
     function setUp() external {
         deployer = new DeployMultisender();
-        factory = deployer.run();
+        // 1. Get the contract instance
+        multisender = deployer.run();
 
-        usdt = ERC20Mock(address(deployer.usdtToken()));
+        // 2. IMPORTANT: Get the EXACT USDT address the contract is using
+        usdt = ERC20Mock(multisender.USDT_TOKEN());
+
+        // 3. Your token is fine as a new instance since it's passed as an argument
         token = new ERC20Mock();
 
-        // Mint USDT to USER for fees
-        usdt.mint(user, 100e6); // 100 USDT
+        // Mint and Approve as before
+        usdt.mint(user, 100e6);
+        token.mint(user, 1000e6);
 
-        // Mint airdrop tokens to USER
-        token.mint(user, 1000e6); // 1000 tokens
-
-        // USER approves factory to spend USDT for fees
-        vm.prank(user);
-        usdt.approve(address(factory), type(uint256).max);
+        vm.startPrank(user); // Using startPrank is cleaner for multiple calls
+        usdt.approve(address(multisender), type(uint256).max);
+        token.approve(address(multisender), type(uint256).max);
+        vm.stopPrank();
     }
 
-
-    function testDeployCreatesMultisender() public {
-        address[] memory recipients = new address[](3);
-        uint256[] memory amounts = new uint256[](3);
-        for (uint256 i = 0; i < recipients.length; i++) {
+    function setRecipientsAndAmounts(
+        uint256 numRecipients
+    ) internal returns (address[] memory, uint256[] memory) {
+        address[] memory recipients = new address[](numRecipients);
+        uint256[] memory amounts = new uint256[](numRecipients);
+        for (uint256 i = 0; i < numRecipients; i++) {
             recipients[i] = makeAddr(vm.toString(i));
             amounts[i] = AIRDROP_AMOUNT;
         }
+        return (recipients, amounts);
+    }
+
+    function testDeployCreatesMultisender() public {
+        (
+            address[] memory recipients,
+            uint256[] memory amounts
+        ) = setRecipientsAndAmounts(3);
         vm.prank(user);
-        address multisenderAddress = factory.deploy(
-            address(token),
-            recipients,
-            amounts
-        );
-        assert(multisenderAddress != address(0));
-        assertEq(factory.getUserDeployments(user).length, 1);
-        assertEq(factory.getUserDeployments(user)[0], multisenderAddress);
+        multisender.execute(address(token), recipients, amounts);
+        assert(address(multisender) != address(0));
+        // Replace with meaningful assertions
+        assertEq(token.balanceOf(recipients[0]), AIRDROP_AMOUNT);
+        assertEq(token.balanceOf(recipients[1]), AIRDROP_AMOUNT);
+        assertEq(token.balanceOf(recipients[2]), AIRDROP_AMOUNT);
+        // Fee was taken
+        assertEq(usdt.balanceOf(address(multisender)), FEE_PER_ADDRESS * 3);
     }
 
     function testFeeIsCollectedCorrectly() public {
-        address[] memory recipients = new address[](3);
-        uint256[] memory amounts = new uint256[](3);
-        for (uint256 i = 0; i < recipients.length; i++) {
-            recipients[i] = makeAddr(vm.toString(i));
-            amounts[i] = AIRDROP_AMOUNT;
-        }
+        (
+            address[] memory recipients,
+            uint256[] memory amounts
+        ) = setRecipientsAndAmounts(3);
         vm.prank(user);
-        factory.deploy(address(token), recipients, amounts);
-        uint256 currentBalance = usdt.balanceOf(address(factory));
-        console.log(currentBalance);
+        multisender.execute(address(token), recipients, amounts);
+        uint256 currentBalance = usdt.balanceOf(address(multisender));
         assertEq(currentBalance, FEE_PER_ADDRESS * recipients.length);
     }
 
     function testExecuteDistributesTokens() public {
-        address[] memory recipients = new address[](3);
-        uint256[] memory amounts = new uint256[](3);
-        for (uint256 i = 0; i < recipients.length; i++) {
-            recipients[i] = makeAddr(vm.toString(i));
-            amounts[i] = AIRDROP_AMOUNT;
-        }
+        (
+            address[] memory recipients,
+            uint256[] memory amounts
+        ) = setRecipientsAndAmounts(3);
         vm.startPrank(user);
-        address multisender = factory.deploy(
-            address(token),
-            recipients,
-            amounts
-        );
-        token.approve(multisender, AIRDROP_AMOUNT * recipients.length);
-        Multisender(multisender).execute();
+        multisender.execute(address(token), recipients, amounts);
+        token.approve(address(multisender), AIRDROP_AMOUNT * recipients.length);
         vm.stopPrank();
         for (uint256 i = 0; i < recipients.length; i++) {
             assertEq(token.balanceOf(recipients[i]), AIRDROP_AMOUNT);
         }
     }
 
-    function testCannotExecuteTwice() public {
-        address[] memory recipients = new address[](3);
-        uint256[] memory amounts = new uint256[](3);
-        for (uint256 i = 0; i < recipients.length; i++) {
-            recipients[i] = makeAddr(vm.toString(i));
-            amounts[i] = AIRDROP_AMOUNT;
-        }
-        vm.startPrank(user);
-        address multisender = factory.deploy(
-            address(token),
-            recipients,
-            amounts
-        );
-        token.approve(multisender, AIRDROP_AMOUNT * recipients.length);
-        Multisender(multisender).execute();
-        vm.expectRevert("Already executed");
-        Multisender(multisender).execute();
-        vm.stopPrank();
-    }
-
     function testOnlyOwnerCanWithdrawFees() public {
-        address[] memory recipients = new address[](3);
-        uint256[] memory amounts = new uint256[](3);
-        for (uint256 i = 0; i < recipients.length; i++) {
-            recipients[i] = makeAddr(vm.toString(i));
-            amounts[i] = AIRDROP_AMOUNT;
-        }
+        (
+            address[] memory recipients,
+            uint256[] memory amounts
+        ) = setRecipientsAndAmounts(3);
+
         vm.startPrank(user);
-        factory.deploy(address(token), recipients, amounts);
-        console.log("Factory address:", address(factory));
-        console.log("Factory USDT balance:", usdt.balanceOf(address(factory)));
-        console.log("Owner:", factory.OWNER());
-        console.log("Test contract:", address(this));
-        console.log(usdt.balanceOf(address(factory.OWNER())));
+        multisender.execute(address(token), recipients, amounts);
         vm.expectRevert();
-        factory.withdrawFees();
+        multisender.withdrawFees();
         vm.stopPrank();
-        console.log("Reverted");
-        // vm.startPrank(address(factory.OWNER()));
-        factory.withdrawFees();
-        assert(usdt.balanceOf(address(factory)) == 0);
+        vm.startPrank(address(multisender.OWNER()));
+        multisender.withdrawFees();
+        assert(usdt.balanceOf(address(multisender)) == 0);
         assert(
-            usdt.balanceOf(factory.OWNER()) ==
+            usdt.balanceOf(multisender.OWNER()) ==
                 FEE_PER_ADDRESS * recipients.length
         );
         vm.stopPrank();
     }
 
-    function testRevertOnTooManyReceipents() public {
-        address[] memory recipients = new address[](251);
-        uint256[] memory amounts = new uint256[](251);
-        for (uint256 i = 0; i < recipients.length; i++) {
-            recipients[i] = makeAddr(vm.toString(i));
-            amounts[i] = AIRDROP_AMOUNT;
-        }
+    function testCheckBoundaryOfRecipients() public {
+        (
+            address[] memory recipients,
+            uint256[] memory amounts
+        ) = setRecipientsAndAmounts(253);
         vm.prank(user);
         vm.expectRevert();
-        factory.deploy(address(token), recipients, amounts);
+        multisender.execute(address(token), recipients, amounts);
     }
 
-    function testGetTotal() public {
-        uint256 sum = 0;
-        address[] memory recipients = new address[](3);
-        uint256[] memory amounts = new uint256[](3);
-        for (uint256 i = 0; i < recipients.length; i++) {
-            recipients[i] = makeAddr(vm.toString(i));
-            amounts[i] = AIRDROP_AMOUNT;
-            sum += AIRDROP_AMOUNT;
-        }
+    function testZeroAddressToken() public {
+        (
+            address[] memory recipients,
+            uint256[] memory amounts
+        ) = setRecipientsAndAmounts(3);
         vm.prank(user);
-        address multisender = factory.deploy(
-            address(token),
-            recipients,
-            amounts
-        );
-        assertEq(Multisender(multisender).getTotal(), sum);
+        vm.expectRevert();
+        multisender.execute(address(0), recipients, amounts);
+    }
+
+    function testZeroAmountInArray() public {
+        (
+            address[] memory recipients,
+            uint256[] memory amounts
+        ) = setRecipientsAndAmounts(3);
+        amounts[1] = 0;
+        vm.prank(user);
+        vm.expectRevert();
+        multisender.execute(address(token), recipients, amounts);
+    }
+
+    function testZeroAddressInRecipients() public {
+        (
+            address[] memory recipients,
+            uint256[] memory amounts
+        ) = setRecipientsAndAmounts(3);
+        recipients[1] = address(0);
+        vm.prank(user);
+        vm.expectRevert();
+        multisender.execute(address(token), recipients, amounts);
+    }
+
+    function testEmptyRecipientsArray() public {
+        (address[] memory recipients, ) = setRecipientsAndAmounts(3);
+        uint256[] memory amounts = new uint256[](0);
+        vm.prank(user);
+        vm.expectRevert();
+        multisender.execute(address(token), recipients, amounts);
+    }
+
+    function testMismatchedArrayLengths() public {
+        (, uint256[] memory amounts) = setRecipientsAndAmounts(3);
+        address[] memory newRecipients = new address[](1);
+        vm.prank(user);
+        vm.expectRevert();
+        multisender.execute(address(token), newRecipients, amounts);
+    }
+
+    // Fee & Token Flow
+
+    function testUserHasInsufficientUSDTForFees() public {
+        (
+            address[] memory recipients,
+            uint256[] memory amounts
+        ) = setRecipientsAndAmounts(3);
+        address otherUser = makeAddr("otherUser");
+        vm.startPrank(otherUser);
+        usdt.approve(address(multisender), 100e6);
+        vm.expectRevert();
+        multisender.execute(address(token), recipients, amounts);
+        vm.stopPrank();
+    }
+
+    function testUserHasInsufficientAirdropTokens() public {
+        (
+            address[] memory recipients,
+            uint256[] memory amounts
+        ) = setRecipientsAndAmounts(3);
+        address otherUser = makeAddr("otherUser");
+        usdt.mint(otherUser, 100e6);
+        vm.startPrank(otherUser);
+        usdt.approve(address(multisender), 100e6);
+        token.approve(address(multisender), 100e6);
+        vm.expectRevert();
+        multisender.execute(address(token), recipients, amounts);
+        vm.stopPrank();
+    }
+
+    function testUserDidntApproveUSDT() public {
+        (
+            address[] memory recipients,
+            uint256[] memory amounts
+        ) = setRecipientsAndAmounts(3);
+        address otherUser = makeAddr("otherUser");
+        usdt.mint(otherUser, 100e6);
+        vm.prank(otherUser);
+        vm.expectRevert();
+        multisender.execute(address(token), recipients, amounts);
+    }
+
+    function testUserDidntApproveAirdropTokens() public {
+        (
+            address[] memory recipients,
+            uint256[] memory amounts
+        ) = setRecipientsAndAmounts(3);
+        address otherUser = makeAddr("otherUser");
+        usdt.mint(otherUser, 200e6);
+        token.mint(otherUser, 100e6);
+        vm.startPrank(otherUser);
+        usdt.approve(address(multisender), 100e6);
+        vm.expectRevert();
+        multisender.execute(address(token), recipients, amounts);
+        vm.stopPrank();
+    }
+
+    function testWithdrawFeesEmpties() public {
+        (
+            address[] memory recipients,
+            uint256[] memory amounts
+        ) = setRecipientsAndAmounts(3);
+        address owner = multisender.OWNER();
+        usdt.mint(owner, 100e6);
+        token.mint(owner, 100e6);
+        vm.startPrank(owner);
+        usdt.approve(address(multisender), 100e6);
+        token.approve(address(multisender), 100e6);
+        multisender.execute(address(token), recipients, amounts);
+        multisender.withdrawFees();
+        vm.stopPrank();
+        assertEq(usdt.balanceOf(address(multisender)), 0);
+        assertEq(usdt.balanceOf(owner), 100e6);
+    }
+
+    function testZeroBalanceShouldRevert() public {
+        address owner = multisender.OWNER();
+        vm.startPrank(owner);
+        vm.expectRevert();
+        multisender.withdrawFees();
+        vm.stopPrank();
+    }
+
+    function testRecicpientIsTheSameAsTheAddress() public {
+        (
+            address[] memory recipients,
+            uint256[] memory amounts
+        ) = setRecipientsAndAmounts(1);
+        recipients[0] = user;
+        uint256 oldBalance = token.balanceOf(user);
+        vm.prank(user);
+        multisender.execute(address(token), recipients, amounts);
+        assertEq(oldBalance, token.balanceOf(user));
+        assertEq(usdt.balanceOf(address(multisender)), FEE_PER_ADDRESS * 1); // fee was taken
+    }
+
+    function testDuplicateRecipients() public {
+        (
+            address[] memory recipients,
+            uint256[] memory amounts
+        ) = setRecipientsAndAmounts(3);
+        recipients[0] = user;
+        recipients[2] = user;
+        uint256 oldBalance = token.balanceOf(user);
+        vm.prank(user);
+        multisender.execute(address(token), recipients, amounts);
+        // user appears twice, so received 2 * AIRDROP_AMOUNT but also sent 2 * AIRDROP_AMOUNT
+        // net token balance should be: oldBalance - AIRDROP_AMOUNT (sent 2, received 2, paid nothing extra in tokens)
+        assertEq(token.balanceOf(user), oldBalance - AIRDROP_AMOUNT); // sent 3 total, got 2 back
+        assertEq(token.balanceOf(recipients[1]), AIRDROP_AMOUNT); // middle recipient got theirs
+    }
+
+    function testRecicpientIsTheContract() public {
+        (
+            address[] memory recipients,
+            uint256[] memory amounts
+        ) = setRecipientsAndAmounts(1);
+        recipients[0] = address(multisender);
+        vm.prank(user);
+        multisender.execute(address(token), recipients, amounts);
+        // Tokens are now stuck in the contract forever
+        assertEq(token.balanceOf(address(multisender)), AIRDROP_AMOUNT);
+    }
+
+    function testFeeTokenAsAirdropToken() public {
+        // SYNC THE ADDRESS: Ensure 'usdt' is the one the contract actually uses
+        usdt = ERC20Mock(multisender.USDT_TOKEN());
+
+        (
+            address[] memory recipients,
+            uint256[] memory amounts
+        ) = setRecipientsAndAmounts(3);
+
+        // Now approve the CORRECT usdt contract
+        vm.startPrank(user);
+        usdt.approve(address(multisender), type(uint256).max);
+
+        // We also need to approve the 'token' if it's different,
+        // but here the token IS usdt!
+
+        multisender.execute(address(usdt), recipients, amounts);
+        vm.stopPrank();
+
+        uint256 totalFee = FEE_PER_ADDRESS * 3;
+        uint256 totalAirdrop = AIRDROP_AMOUNT * 3;
+        assertEq(usdt.balanceOf(user), 100e6 - totalFee - totalAirdrop);
+    }
+
+    // Event
+
+    function testAirdropEvent() public {
+        (
+            address[] memory recipients,
+            uint256[] memory amounts
+        ) = setRecipientsAndAmounts(3);
+        uint256 totalAmount = 30e6; // 3 recipients * 10e6
+
+        // amenaverjiny expectEmit-i data-i hamara,i.e. stuguma vor datanery chisht en
+        // datanery ayn parametrern en, voronq chunen indexed keyword eventum
+        // amenaqichy 4 param, arajin 3y indexed paramneri hamar
+        // qani vor chka indexed param, arajin 3y karox enq dnel false, vor chstugi
+        vm.expectEmit(false, false, false, true);
+
+        // 2. Emit the "expected" event manually (this is the reference point)
+        emit Multisender.AirdropExecuted(address(token), user, 3, totalAmount);
+
+        // 3. Trigger the actual function that emits the event
+        vm.prank(user);
+        multisender.execute(address(token), recipients, amounts);
     }
 }
